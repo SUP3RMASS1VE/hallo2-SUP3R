@@ -46,7 +46,7 @@ This module is part of a larger ecosystem of diffusion models and can be used fo
 from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, Callable
 
 import torch
 import torch.utils.checkpoint
@@ -863,9 +863,27 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
         for module in self.children():
             fn_recursive_set_attention_slice(module, reversed_slice_size)
 
-    def _set_gradient_checkpointing(self, module, value=False):
-        if hasattr(module, "gradient_checkpointing"):
-            module.gradient_checkpointing = value
+    def _set_gradient_checkpointing(self, enable: bool = True, gradient_checkpointing_func: Callable = torch.utils.checkpoint.checkpoint) -> None:
+        """
+        Set gradient checkpointing for the model.
+        
+        Args:
+            enable (bool): Whether to enable gradient checkpointing.
+            gradient_checkpointing_func (Callable): The gradient checkpointing function to use.
+        """
+        is_gradient_checkpointing_set = False
+
+        for name, module in self.named_modules():
+            if hasattr(module, "gradient_checkpointing"):
+                module._gradient_checkpointing_func = gradient_checkpointing_func
+                module.gradient_checkpointing = enable
+                is_gradient_checkpointing_set = True
+
+        if not is_gradient_checkpointing_set:
+            raise ValueError(
+                f"The module {self.__class__.__name__} does not support gradient checkpointing. Please make sure to "
+                f"use a module that supports gradient checkpointing by creating a boolean attribute `gradient_checkpointing`."
+            )
 
     def enable_freeu(self, s1, s2, b1, b2):
         r"""Enables the FreeU mechanism from https://arxiv.org/abs/2309.11497.
