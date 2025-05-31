@@ -41,6 +41,7 @@ import numpy as np
 import torchvision.transforms as transforms
 from PIL import Image
 from pydub import AudioSegment
+from tqdm import tqdm
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -226,12 +227,14 @@ def inference_process(args: argparse.Namespace):
 
     
     if config.use_cut:
+        print("[AUDIO] Cutting audio into segments...")
         audio_list = cut_audio(driving_audio_path, os.path.join(
             save_path, f"seg-long-{Path(driving_audio_path).stem}"))
 
         audio_emb_list = []
         l = 0
 
+        print("[AUDIO] Processing audio embeddings...")
         audio_processor = AudioProcessor(
                 sample_rate,
                 fps,
@@ -242,7 +245,7 @@ def inference_process(args: argparse.Namespace):
                 os.path.join(save_path, "audio_preprocess")
             )
         
-        for idx, audio_path in enumerate(audio_list):
+        for idx, audio_path in tqdm(enumerate(audio_list), desc="Processing audio segments", total=len(audio_list)):
             padding = (idx+1) == len(audio_list)
             emb, length = audio_processor.preprocess(audio_path, clip_length, 
                                                      padding=padding, processed_length=l)
@@ -251,8 +254,10 @@ def inference_process(args: argparse.Namespace):
         
         audio_emb = torch.cat(audio_emb_list)
         audio_length = l
+        print(f"[DONE] Audio processing complete! Total frames: {audio_length}")
     
     else:
+        print("[AUDIO] Processing audio embeddings...")
         with AudioProcessor(
                 sample_rate,
                 fps,
@@ -263,8 +268,10 @@ def inference_process(args: argparse.Namespace):
                 os.path.join(save_path, "audio_preprocess")
             ) as audio_processor:
                 audio_emb, audio_length = audio_processor.preprocess(driving_audio_path, clip_length)
+        print(f"[DONE] Audio processing complete! Total frames: {audio_length}")
 
     # 4. build modules
+    print("[INIT] Building and loading models...")
     sched_kwargs = OmegaConf.to_container(config.noise_scheduler_kwargs)
     if config.enable_zero_snr:
         sched_kwargs.update(
@@ -336,6 +343,7 @@ def inference_process(args: argparse.Namespace):
     print("loaded weight from ", os.path.join(audio_ckpt_dir, "net.pth"))
 
     # 5. inference
+    print("[INIT] Initializing inference pipeline...")
     pipeline = FaceAnimatePipeline(
         vae=vae,
         reference_unet=net.reference_unet,
@@ -346,6 +354,7 @@ def inference_process(args: argparse.Namespace):
     )
     pipeline.to(device=device, dtype=weight_dtype)
 
+    print("[PROCESS] Processing audio embeddings...")
     audio_emb = process_audio_emb(audio_emb)
 
     source_image_pixels = source_image_pixels.unsqueeze(0)
@@ -368,6 +377,17 @@ def inference_process(args: argparse.Namespace):
 
 
     times = audio_emb.shape[0] // clip_length
+    
+    print(f"[VIDEO] Starting video generation...")
+    print(f"[INFO] Total segments to process: {times}")
+    print(f"[INFO] Frames per segment: {clip_length}")
+    print(f"[INFO] Inference steps per segment: {config.inference_steps}")
+    
+    # Calculate estimated time
+    estimated_time_per_segment = 30  # seconds (rough estimate)
+    estimated_total_time = times * estimated_time_per_segment
+    print(f"[TIME] Estimated total time: {estimated_total_time // 60:.0f}m {estimated_total_time % 60:.0f}s")
+    print()
 
     tensor_result = []
 
@@ -378,8 +398,14 @@ def inference_process(args: argparse.Namespace):
     batch_size = 60
     start = 0
 
-    for t in range(times):
-        print(f"[{t+1}/{times}]")
+    progress_bar = tqdm(range(times), desc="[VIDEO] Generating video")
+    for t in progress_bar:
+        # Update progress bar description with current segment info
+        progress_bar.set_description(f"[VIDEO] Segment {t+1}/{times}")
+        progress_bar.set_postfix({
+            'frames_done': f"{(t * clip_length)}/{audio_length}",
+            'progress': f"{(t / times * 100):.1f}%"
+        })
 
         if len(tensor_result) == 0:
             # The first iteration
